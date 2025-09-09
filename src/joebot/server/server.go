@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"log"
@@ -27,6 +28,8 @@ type Server struct {
 	portsManager *utils.PortsManager
 	gostTunnels  []*GostTunnel
 	tcpListener  net.Listener
+	tlsCert string
+	tlsKey string
 
 	sync.RWMutex         // Mutex lock for creating tunnel
 	gostTunnelStartIndex int
@@ -41,7 +44,7 @@ type Server struct {
 	UserRepo repository.UserRepository
 }
 
-func NewServer(logger *logrus.Logger) *Server {
+func NewServer(logger *logrus.Logger, tlsCert string, tlsKey string) *Server {
 	if logger == nil {
 		logger = logrus.New()
 	}
@@ -51,6 +54,8 @@ func NewServer(logger *logrus.Logger) *Server {
 	server.portsManager = utils.NewPortsManager()
 	server.gostTunnels = []*GostTunnel{}
 	server.gostTunnelStartIndex = 0
+	server.tlsCert = tlsCert
+	server.tlsKey = tlsKey
 	server.InitDB()
 
 	server.clientsListLock = make(chan bool, 1)
@@ -256,11 +261,26 @@ func (server *Server) Start(port int) error {
 		}(server, gostTunnel)
 	}
 
-	server.tcpListener, err = net.Listen("tcp", ":"+strconv.Itoa(port))
+	rawListener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		err = errors.Wrap(err, "Unable to start server")
 		server.logger.Error(err)
 		return err
+	}
+
+	// ----- TLS upgrade (only when flgas are provided) ----
+	if server.tlsCert != "" && server.tlsKey != "" {
+		cert, err := tls.LoadX509KeyPair(server.tlsCert, server.tlsKey)
+		if err != nil {
+			return errors.Wrap(err, "invalid TLS cert/key")
+		}
+
+		cfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+		server.tcpListener = tls.NewListener(rawListener, cfg)
+		server.logger.Infof("Control channel listening with TLS on :%d", port)
+	} else {
+		server.tcpListener = rawListener
+		server.logger.Infof("Control channel listening without TLS on :%d", port)
 	}
 
 	go func() {

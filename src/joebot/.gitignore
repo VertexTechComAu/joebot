@@ -1,0 +1,6 @@
+# === Secrets & runtime files ===
+*.pem
+*.crt
+*.key
+*.db
+*.exe

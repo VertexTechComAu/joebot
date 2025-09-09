@@ -11,6 +11,7 @@ go 1.23
 
 require (
 	github.com/asdine/storm v2.1.2+incompatible
+	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/filebrowser/filebrowser/v2 v2.0.0-00010101000000-000000000000
 	github.com/ginuerzh/gost v0.0.0-00010101000000-000000000000
 	github.com/hashicorp/yamux v0.0.0-20210316155119-a95892c5f864
@@ -48,7 +49,6 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.0-20190314233015-f79a8a8ca69d // indirect
 	github.com/creack/pty v1.1.13 // indirect
 	github.com/dchest/siphash v1.2.0 // indirect
-	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
 	github.com/docker/libcontainer v2.2.1+incompatible // indirect
 	github.com/dsnet/compress v0.0.1 // indirect

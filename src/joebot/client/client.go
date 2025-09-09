@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"os"
@@ -37,6 +39,9 @@ type Client struct {
 	allowedPortRangeUBound int
 	portsManager           *utils.PortsManager
 
+	useTLS bool
+	ca string
+
 	gostTunnels    []*gost.Server
 	tunnelListLock chan bool
 
@@ -49,7 +54,7 @@ type Client struct {
 	stop context.CancelFunc
 }
 
-func NewClient(serverIP string, serverPort int, serverWebPortalPort int, allowedPortRangeLBound int, allowedPortRangeUBound int, tags []string, logger *logrus.Logger) *Client {
+func NewClient(serverIP string, serverPort int, serverWebPortalPort int, allowedPortRangeLBound int, allowedPortRangeUBound int, tags []string, useTLS bool, ca string, logger *logrus.Logger) *Client {
 	if logger == nil {
 		logger = logrus.New()
 	}
@@ -61,6 +66,8 @@ func NewClient(serverIP string, serverPort int, serverWebPortalPort int, allowed
 	client.serverPort = serverPort
 	client.serverWebPortalPort = serverWebPortalPort
 	client.reconnectInterval = 5 * time.Second
+	client.useTLS = useTLS
+	client.ca = ca
 
 	client.allowedPortRangeLBound = allowedPortRangeLBound
 	client.allowedPortRangeUBound = allowedPortRangeUBound
@@ -126,7 +133,7 @@ func (client *Client) Reconnect() {
 		client.logger.Info("Sleep Before Reconnecting")
 		time.Sleep(client.reconnectInterval)
 		client.logger.Info("Reconnecting...")
-		c := NewClient(client.serverIP, client.serverPort, client.serverWebPortalPort, client.allowedPortRangeLBound, client.allowedPortRangeUBound, client.Tags, client.logger)
+		c := NewClient(client.serverIP, client.serverPort, client.serverWebPortalPort, client.allowedPortRangeLBound, client.allowedPortRangeUBound, client.Tags, client.useTLS, client.ca, client.logger)
 		c.FilebrowserDefaultDir = client.FilebrowserDefaultDir
 		c.Start()
 	}(client)
@@ -135,9 +142,26 @@ func (client *Client) Reconnect() {
 func (client *Client) Start() {
 	var err error
 
-	// Get a TCP connection
-	client.conn, err = net.Dial("tcp", client.serverIP+":"+strconv.Itoa(client.serverPort))
-	if client.ExitIfError(err, "Unable to connect to server: "+client.serverIP+":"+strconv.Itoa(client.serverPort)) {
+	addr := client.serverIP + ":" + strconv.Itoa(client.serverPort)
+	if client.useTLS {
+		tlsCfg := &tls.Config{
+			InsecureSkipVerify: client.ca == "",
+		}
+		if client.ca != "" {
+			ca, _ := os.ReadFile((client.ca))
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(ca)
+			tlsCfg.RootCAs = pool
+		}
+		client.conn, err = tls.Dial("tcp", addr, tlsCfg)
+		client.logger.Infof("Client dial with TLS on :%s", addr)
+	} else {
+		// Get a TCP connection
+		client.conn, err = net.Dial("tcp", addr)
+		client.logger.Infof("Client dial without TLS on :%s", addr)
+	}
+
+	if client.ExitIfError(err, "Unable to connect to server: "+addr) {
 		return
 	}
 
