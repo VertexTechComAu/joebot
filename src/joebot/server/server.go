@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -36,7 +37,7 @@ type Server struct {
 	clients         []*Client
 	clientsListLock chan bool
 
-	listeners     map[int]net.Listener
+	listeners     map[int]*http.Server
 	listenersLock sync.Mutex
 
 	ctx  context.Context
@@ -54,7 +55,7 @@ func NewServer(logger *logrus.Logger, db *sql.DB) *Server {
 	server.portsManager = utils.NewPortsManager()
 	server.gostTunnels = []*GostTunnel{}
 	server.gostTunnelStartIndex = 0
-	server.listeners = make(map[int]net.Listener)
+	server.listeners = make(map[int]*http.Server)
 
 	server.clientsListLock = make(chan bool, 1)
 	server.clientsListLock <- true
@@ -65,7 +66,7 @@ func NewServer(logger *logrus.Logger, db *sql.DB) *Server {
 	return server
 }
 
-func (server *Server) AddListener(port int, listener net.Listener) {
+func (server *Server) AddListener(port int, listener *http.Server) {
 	server.listenersLock.Lock()
 	defer server.listenersLock.Unlock()
 	server.listeners[port] = listener
@@ -75,7 +76,7 @@ func (server *Server) RemoveListener(port int) {
 	server.listenersLock.Lock()
 	defer server.listenersLock.Unlock()
 	if listener, ok := server.listeners[port]; ok {
-		listener.Close()
+		listener.Shutdown(context.Background())
 		delete(server.listeners, port)
 	}
 }
@@ -146,7 +147,7 @@ func (server *Server) Stop() error {
 	server.listenersLock.Lock()
 	defer server.listenersLock.Unlock()
 	for port, listener := range server.listeners {
-		listener.Close()
+		listener.Shutdown(context.Background())
 		delete(server.listeners, port)
 	}
 	return server.tcpListener.Close()

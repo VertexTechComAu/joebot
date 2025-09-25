@@ -95,7 +95,7 @@ func NewGostTunnel(port int, server *Server) *GostTunnel {
 func (g *GostTunnel) Lock() {
 	<-g.tunnelsRequestLimiter
 
-	diff := time.Since(g.lastServeTime).Seconds()
+	diff := time.Now().Sub(g.lastServeTime).Seconds()
 	if diff < 10 {
 		time.Sleep(time.Duration(10-diff) * time.Second)
 	}

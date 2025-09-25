@@ -3,10 +3,12 @@ package server
 import (
 	"context"
 	"encoding/binary"
-	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httputil"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/harmonicinc-com/joebot/utils"
@@ -235,79 +237,6 @@ func (client *Client) CreateNovncWebsocketTunnel(clientVncPort int) (models.Novn
 	return novncWebsocketInfo, nil
 }
 
-func (client *Client) forwardConnection(browserConn net.Conn, clientPort int) {
-	defer browserConn.Close()
-
-	var ip string
-	if addr, ok := browserConn.RemoteAddr().(*net.TCPAddr); ok {
-		ip = addr.IP.String()
-	} else {
-		remoteAddr := browserConn.RemoteAddr().String()
-		host, _, err := net.SplitHostPort(remoteAddr)
-		if err != nil {
-			ip = remoteAddr
-		} else {
-			ip = host
-		}
-	}
-
-	log.Printf("DEBUG: Checking IP whitelist for tunnel connection from %s", ip)
-	isWhitelisted, err := client.server.IsIPWhitelisted(ip)
-	if err != nil {
-		log.Printf("DEBUG: Error checking IP whitelist for %s: %v", ip, err)
-		return
-	}
-
-	if !isWhitelisted {
-		log.Printf("DEBUG: Blocked unauthorized tunnel request from IP: %s", ip)
-		return
-	}
-	log.Printf("DEBUG: Allowed tunnel connection from whitelisted IP: %s", ip)
-
-	forwardStream, err := client.session.Open()
-	if err != nil {
-		client.logger.Errorf("Failed to open yamux stream for forwarding: %v", err)
-		return
-	}
-	defer forwardStream.Close()
-
-	// 1. Write Task Type
-	bs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(bs, uint32(task.PortTunnelRequest))
-	_, err = forwardStream.Write(bs)
-	if err != nil {
-		client.logger.Errorf("Failed to write task type for forwarding: %v", err)
-		return
-	}
-
-	// 2. Write Payload (clientPort)
-	payload := utils.StructToBytes(clientPort)
-	bs = make([]byte, 8)
-	binary.LittleEndian.PutUint64(bs, uint64(len(payload)))
-	_, err = forwardStream.Write(bs)
-	if err != nil {
-		client.logger.Errorf("Failed to write payload length for forwarding: %v", err)
-		return
-	}
-	_, err = forwardStream.Write(payload)
-	if err != nil {
-		client.logger.Errorf("Failed to write payload for forwarding: %v", err)
-		return
-	}
-
-	// 3. Pipe data
-	errc := make(chan error, 1)
-	go func() {
-		_, err := io.Copy(forwardStream, browserConn)
-		errc <- err
-	}()
-	go func() {
-		_, err := io.Copy(browserConn, forwardStream)
-		errc <- err
-	}()
-	<-errc
-}
-
 func (client *Client) CreateTunnel(clientPort int) (models.PortTunnelInfo, error) {
 	var err error
 	var tunnel models.PortTunnelInfo
@@ -330,21 +259,88 @@ func (client *Client) CreateTunnel(clientPort int) (models.PortTunnelInfo, error
 		client.server.portsManager.ReleasePort(serverPort)
 		return tunnel, errors.Wrap(err, "Failed to create listener on server port")
 	}
-	client.server.AddListener(serverPort, listener)
-	client.logger.WithField("Client ID", client.ID).Infof("Server listening on port %d for tunnel to client port %d", serverPort, clientPort)
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = "http"
+			req.URL.Host = "localhost:" + strconv.Itoa(clientPort)
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				forwardStream, err := client.session.Open()
+				if err != nil {
+					return nil, errors.Wrap(err, "Failed to open yamux stream for forwarding")
+				}
+
+				// 1. Write Task Type
+				bs := make([]byte, 4)
+				binary.LittleEndian.PutUint32(bs, uint32(task.PortTunnelRequest))
+				_, err = forwardStream.Write(bs)
+				if err != nil {
+					forwardStream.Close()
+					return nil, errors.Wrap(err, "Failed to write task type for forwarding")
+				}
+
+				// 2. Write Payload (clientPort)
+				payload := utils.StructToBytes(clientPort)
+				bs = make([]byte, 8)
+				binary.LittleEndian.PutUint64(bs, uint64(len(payload)))
+				_, err = forwardStream.Write(bs)
+				if err != nil {
+					forwardStream.Close()
+					return nil, errors.Wrap(err, "Failed to write payload length for forwarding")
+				}
+				_, err = forwardStream.Write(payload)
+				if err != nil {
+					forwardStream.Close()
+					return nil, errors.Wrap(err, "Failed to write payload for forwarding")
+				}
+				return forwardStream, nil
+			},
+		},
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.Header.Get("X-Forwarded-For")
+		if ip == "" {
+			ip = r.Header.Get("X-Real-IP")
+		}
+		if ip == "" {
+			var err error
+			ip, _, err = net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				ip = r.RemoteAddr
+			}
+		} else {
+			ip = strings.Split(ip, ",")[0]
+		}
+
+		log.Printf("DEBUG: Checking IP whitelist for tunnel connection from %s", ip)
+		isWhitelisted, err := client.server.IsIPWhitelisted(ip)
+		if err != nil {
+			log.Printf("DEBUG: Error checking IP whitelist for %s: %v", ip, err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		if !isWhitelisted {
+			log.Printf("DEBUG: Blocked unauthorized tunnel request from IP: %s", ip)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("DEBUG: Allowed tunnel connection from whitelisted IP: %s", ip)
+		proxy.ServeHTTP(w, r)
+	})
+
+	httpServer := &http.Server{Handler: handler}
+	client.server.AddListener(serverPort, httpServer)
 
 	go func() {
 		defer client.server.RemoveListener(serverPort)
-		for {
-			browserConn, err := listener.Accept()
-			if err != nil {
-				// Listener was closed, exit the loop
-				return
-			}
-			go client.forwardConnection(browserConn, clientPort)
-		}
+		httpServer.Serve(listener)
 	}()
 
+	client.logger.WithField("Client ID", client.ID).Infof("Server listening on port %d for tunnel to client port %d", serverPort, clientPort)
 	tunnel.ServerPort = serverPort
 	tunnel.ClientPort = clientPort
 	client.Info.PortTunnels = append(client.Info.PortTunnels, tunnel)
@@ -355,6 +351,7 @@ func (client *Client) Stop() error {
 	defer func() {
 		for _, t := range client.Info.PortTunnels {
 			client.server.portsManager.ReleasePort(t.ServerPort)
+			client.server.RemoveListener(t.ServerPort)
 		}
 		client.Info.PortTunnels = []models.PortTunnelInfo{}
 	}()
