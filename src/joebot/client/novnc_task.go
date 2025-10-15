@@ -20,6 +20,7 @@ type NovncTask struct {
 	client *Client
 	logger *logrus.Logger
 	ctx    context.Context
+	noTLS  bool
 }
 
 // NewNovncTask creates a new task handler for NoVNC, returning the correct task.Tasker interface.
@@ -28,6 +29,7 @@ func NewNovncTask(client *Client) task.Tasker {
 		client: client,
 		logger: client.logger,
 		ctx:    client.ctx,
+		noTLS:  client.noTLS,
 	}
 }
 
@@ -51,25 +53,40 @@ func (t *NovncTask) handle(tunnelInfo models.NovncWebsocketInfo) {
 	//    In your version of gost, the handler is created directly with the chain.
 	handler := gost.TCPDirectForwardHandler(fmt.Sprintf("127.0.0.1:%d", tunnelInfo.VncServerPort))
 
-	// 3. Manually create a TLS configuration using the client's certificates.
-	cert, err := tls.LoadX509KeyPair(t.client.clientCertPath, t.client.clientKeyPath)
-	if err != nil {
-		t.logger.Errorf("NoVNC: Failed to load key pair: %v", err)
-		return
-	}
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
+	var ln net.Listener
+	var err error
 
-	// 4. Create the secure WebSocket listener.
-	ln, err := gost.WSSListener(
-		fmt.Sprintf(":%d", tunnelInfo.NovncWebsocketPort),
-		tlsConfig,
-		nil,
-	)
-	if err != nil {
-		t.logger.Errorf("NoVNC: Failed to create WSS listener: %v", err)
-		return
+	if t.noTLS {
+		// 4. Create an unencrypted WebSocket listener.
+		ln, err = gost.WSListener(
+			fmt.Sprintf(":%d", tunnelInfo.NovncWebsocketPort),
+			nil,
+		)
+		if err != nil {
+			t.logger.Errorf("NoVNC: Failed to create WS listener: %v", err)
+			return
+		}
+	} else {
+		// 3. Manually create a TLS configuration using the client's certificates.
+		cert, err := tls.LoadX509KeyPair(t.client.clientCertPath, t.client.clientKeyPath)
+		if err != nil {
+			t.logger.Errorf("NoVNC: Failed to load key pair: %v", err)
+			return
+		}
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+
+		// 4. Create the secure WebSocket listener.
+		ln, err = gost.WSSListener(
+			fmt.Sprintf(":%d", tunnelInfo.NovncWebsocketPort),
+			tlsConfig,
+			nil,
+		)
+		if err != nil {
+			t.logger.Errorf("NoVNC: Failed to create WSS listener: %v", err)
+			return
+		}
 	}
 
 	// 5. Create and run the gost server.
@@ -78,7 +95,7 @@ func (t *NovncTask) handle(tunnelInfo models.NovncWebsocketInfo) {
 	t.client.AddTunnel(gostServer)          // Use the correct AddTunnel method from client.go
 	defer t.client.RemoveTunnel(gostServer) // Use the correct RemoveTunnel method
 
-	t.logger.Infof("Starting Secure NoVNC Websocket Tunnel on port %d -> tcp://127.0.0.1:%d", tunnelInfo.NovncWebsocketPort, tunnelInfo.VncServerPort)
+	t.logger.Infof("Starting NoVNC Websocket Tunnel on port %d -> tcp://127.0.0.1:%d", tunnelInfo.NovncWebsocketPort, tunnelInfo.VncServerPort)
 
 	// Serve will block until the listener is closed.
 	if err := gostServer.Serve(handler); err != nil {

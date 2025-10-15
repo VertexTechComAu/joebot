@@ -30,9 +30,11 @@ var (
 	serverPort      = serverCommand.Flag("port", "Port for listening to client connections.").Default("13579").Short('p').Int()
 	webPortalPort   = serverCommand.Flag("web-portal-port", "Port for the secure web portal.").Default("8080").Short('w').Int()
 	sDbPath         = serverCommand.Flag("db-path", "Path to SQLite3 database file.").Default("./joebot.db").String()
-	sCaCertPath     = serverCommand.Flag("ca-cert", "Path to the CA certificate file.").Required().String()
-	sServerCertPath = serverCommand.Flag("server-cert", "Path to the server certificate file.").Required().String()
-	sServerKeyPath  = serverCommand.Flag("server-key", "Path to the server key file.").Required().String()
+	sCaCertPath     = serverCommand.Flag("ca-cert", "Path to the CA certificate file.").String()
+	sServerCertPath = serverCommand.Flag("server-cert", "Path to the server certificate file.").String()
+	sServerKeyPath  = serverCommand.Flag("server-key", "Path to the server key file.").String()
+	sNoTLS          = serverCommand.Flag("no-tls", "Disable TLS encryption.").Bool()
+	sVerbose        = serverCommand.Flag("verbose", "Enable verbose logging.").Bool()
 
 	// --- Client Command and Flags ---
 	clientCommand                = app.Command("client", "Run in client mode.")
@@ -42,9 +44,11 @@ var (
 	cAllowedPortRangeUBound      = clientCommand.Flag("allowed-port-upper-bound", "Upper bound of allowed port range for tunnels.").Default("65535").Short('u').Int()
 	cTags                        = clientCommand.Flag("tag", "Tags for client identification.").Strings()
 	cFilebrowserDefaultDirectory = clientCommand.Flag("dir", "Default directory for the File Browser.").Default("/").Short('f').String()
-	cCaCertPath                  = clientCommand.Flag("ca-cert", "Path to the CA certificate file.").Required().String()
-	cClientCertPath              = clientCommand.Flag("client-cert", "Path to the client certificate file.").Required().String()
-	cClientKeyPath               = clientCommand.Flag("client-key", "Path to the client key file.").Required().String()
+	cCaCertPath                  = clientCommand.Flag("ca-cert", "Path to the CA certificate file.").String()
+	cClientCertPath              = clientCommand.Flag("client-cert", "Path to the client certificate file.").String()
+	cClientKeyPath               = clientCommand.Flag("client-key", "Path to the client key file.").String()
+	cNoTLS                       = clientCommand.Flag("no-tls", "Disable TLS encryption.").Bool()
+	cVerbose                     = clientCommand.Flag("verbose", "Enable verbose logging.").Bool()
 
 	// --- User Management Commands ---
 	userCommand     = app.Command("user", "Manage web portal users.")
@@ -100,6 +104,9 @@ func main() {
 	switch command {
 	// --- Server Mode Execution ---
 	case serverCommand.FullCommand():
+		if !*sNoTLS && (*sCaCertPath == "" || *sServerCertPath == "" || *sServerKeyPath == "") {
+			log.Fatalf("FATAL: --ca-cert, --server-cert, and --server-key are required unless --no-tls is specified.")
+		}
 		db, err := initDB(*sDbPath)
 		if err != nil {
 			log.Fatalf("FATAL: Failed to initialize database: %v", err)
@@ -107,8 +114,12 @@ func main() {
 		defer db.Close()
 		log.Println("Successfully connected to the database.")
 
-		s := server.NewServer(logrus.New(), db)
-		go s.Start(*serverPort, *sCaCertPath, *sServerCertPath, *sServerKeyPath)
+		logger := logrus.New()
+		if *sVerbose {
+			logger.SetLevel(logrus.DebugLevel)
+		}
+		s := server.NewServer(logger, db)
+		go s.Start(*serverPort, *sCaCertPath, *sServerCertPath, *sServerKeyPath, *sNoTLS)
 
 		e := echo.New()
 		v1 := e.Group("/api")
@@ -211,15 +222,31 @@ func main() {
 			return c.String(http.StatusOK, result)
 		})
 
-		log.Printf("Secure web portal starting on https://0.0.0.0:%d", *webPortalPort)
-		if err := e.StartTLS(":"+strconv.Itoa(*webPortalPort), *sServerCertPath, *sServerKeyPath); err != nil {
-			log.Fatal("FATAL: Could not start secure web portal: ", err)
+		log.Printf("Web portal starting on http://0.0.0.0:%d", *webPortalPort)
+		if *sNoTLS {
+			if err := e.Start(":" + strconv.Itoa(*webPortalPort)); err != nil {
+				log.Fatal("FATAL: Could not start web portal: ", err)
+			}
+		} else {
+			log.Printf("Secure web portal starting on https://0.0.0.0:%d", *webPortalPort)
+			if err := e.StartTLS(":"+strconv.Itoa(*webPortalPort), *sServerCertPath, *sServerKeyPath); err != nil {
+				log.Fatal("FATAL: Could not start secure web portal: ", err)
+			}
 		}
 
 	case clientCommand.FullCommand():
+		if !*cNoTLS && (*cCaCertPath == "" || *cClientCertPath == "" || *cClientKeyPath == "") {
+			log.Fatalf("FATAL: --ca-cert, --client-cert, and --client-key are required unless --no-tls is specified.")
+		}
 		wg := &sync.WaitGroup{}
 		wg.Add(1)
-		c := client.NewClient(*cServerIP, *cServerPort, *cAllowedPortRangeLBound, *cAllowedPortRangeUBound, *cTags, *cCaCertPath, *cClientCertPath, *cClientKeyPath, nil)
+
+		logger := logrus.New()
+		if *cVerbose {
+			logger.SetLevel(logrus.DebugLevel)
+		}
+
+		c := client.NewClient(*cServerIP, *cServerPort, *cAllowedPortRangeLBound, *cAllowedPortRangeUBound, *cTags, *cCaCertPath, *cClientCertPath, *cClientKeyPath, *cNoTLS, logger)
 		c.FilebrowserDefaultDir = *cFilebrowserDefaultDirectory
 		c.Start()
 		wg.Wait()

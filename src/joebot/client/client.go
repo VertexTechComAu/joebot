@@ -53,9 +53,10 @@ type Client struct {
 	caCertPath     string
 	clientCertPath string
 	clientKeyPath  string
+	noTLS          bool
 }
 
-func NewClient(serverIP string, serverPort int, allowedPortRangeLBound int, allowedPortRangeUBound int, tags []string, caCert, clientCert, clientKey string, logger *logrus.Logger) *Client {
+func NewClient(serverIP string, serverPort int, allowedPortRangeLBound int, allowedPortRangeUBound int, tags []string, caCert, clientCert, clientKey string, noTLS bool, logger *logrus.Logger) *Client {
 	if logger == nil {
 		logger = logrus.New()
 	}
@@ -81,6 +82,7 @@ func NewClient(serverIP string, serverPort int, allowedPortRangeLBound int, allo
 	client.caCertPath = caCert
 	client.clientCertPath = clientCert
 	client.clientKeyPath = clientKey
+	client.noTLS = noTLS
 
 	return client
 }
@@ -131,40 +133,50 @@ func (client *Client) Reconnect() {
 		c.logger.Info("Sleep Before Reconnecting")
 		time.Sleep(c.reconnectInterval)
 		c.logger.Info("Reconnecting...")
-		// Pass cert paths during reconnection
-		newClient := NewClient(c.serverIP, c.serverPort, c.allowedPortRangeLBound, c.allowedPortRangeUBound, c.Tags, c.caCertPath, c.clientCertPath, c.clientKeyPath, c.logger)
+		// Pass cert paths and noTLS flag during reconnection
+		newClient := NewClient(c.serverIP, c.serverPort, c.allowedPortRangeLBound, c.allowedPortRangeUBound, c.Tags, c.caCertPath, c.clientCertPath, c.clientKeyPath, c.noTLS, c.logger)
 		newClient.FilebrowserDefaultDir = c.FilebrowserDefaultDir
 		newClient.Start()
 	}(client)
 }
 
 func (client *Client) Start() {
-	// Load client's certificate and private key
-	cert, err := tls.LoadX509KeyPair(client.clientCertPath, client.clientKeyPath)
-	if client.ExitIfError(err, "client: loadkeys") {
-		return
-	}
+	var err error
+	if client.noTLS {
+		// Get a regular TCP connection
+		client.conn, err = net.Dial("tcp", client.serverIP+":"+strconv.Itoa(client.serverPort))
+		if client.ExitIfError(err, "Unable to connect to server: "+client.serverIP+":"+strconv.Itoa(client.serverPort)) {
+			return
+		}
+		log.Println("Connected to joebot server")
+	} else {
+		// Load client's certificate and private key
+		cert, err := tls.LoadX509KeyPair(client.clientCertPath, client.clientKeyPath)
+		if client.ExitIfError(err, "client: loadkeys") {
+			return
+		}
 
-	// Create a CA certificate pool and add ca.crt to it
-	caCert, err := os.ReadFile(client.caCertPath)
-	if client.ExitIfError(err, "client: read ca cert") {
-		return
-	}
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
+		// Create a CA certificate pool and add ca.crt to it
+		caCert, err := os.ReadFile(client.caCertPath)
+		if client.ExitIfError(err, "client: read ca cert") {
+			return
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
 
-	// Create a TLS configuration
-	config := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caCertPool,
-	}
+		// Create a TLS configuration
+		config := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			RootCAs:      caCertPool,
+		}
 
-	// Get a secure TCP connection
-	client.conn, err = tls.Dial("tcp", client.serverIP+":"+strconv.Itoa(client.serverPort), config)
-	if client.ExitIfError(err, "Unable to connect securely to server: "+client.serverIP+":"+strconv.Itoa(client.serverPort)) {
-		return
+		// Get a secure TCP connection
+		client.conn, err = tls.Dial("tcp", client.serverIP+":"+strconv.Itoa(client.serverPort), config)
+		if client.ExitIfError(err, "Unable to connect securely to server: "+client.serverIP+":"+strconv.Itoa(client.serverPort)) {
+			return
+		}
+		log.Println("Connected securely to joebot server")
 	}
-	log.Println("Connected securely to joebot server")
 
 	// Setup client side of yamux
 	client.session, err = yamux.Client(client.conn, nil)

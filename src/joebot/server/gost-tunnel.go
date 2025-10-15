@@ -76,9 +76,10 @@ type GostTunnel struct {
 
 	tunnelsRequestLimiter chan bool // Set max tunnel req at one time
 	lastServeTime         time.Time
+	noTLS                 bool
 }
 
-func NewGostTunnel(port int, server *Server) *GostTunnel {
+func NewGostTunnel(port int, server *Server, noTLS bool) *GostTunnel {
 	obj := new(GostTunnel)
 	obj.Port = port
 	obj.server = server
@@ -88,6 +89,7 @@ func NewGostTunnel(port int, server *Server) *GostTunnel {
 	obj.tunnelsRequestLimiter <- true
 
 	obj.lastServeTime = time.Now()
+	obj.noTLS = noTLS
 
 	return obj
 }
@@ -114,11 +116,19 @@ func (g *GostTunnel) Serve() error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	h := gost.SSHForwardHandler(
-		gost.AddrHandlerOption(addr),
-		// gost.UsersHandlerOption(url.UserPassword("admin", "123456")),
-		gost.TLSConfigHandlerOption(tlsConfig()),
-	)
+
+	var h gost.Handler
+	if g.noTLS {
+		h = gost.SSHForwardHandler(
+			gost.AddrHandlerOption(addr),
+		)
+	} else {
+		h = gost.SSHForwardHandler(
+			gost.AddrHandlerOption(addr),
+			// gost.UsersHandlerOption(url.UserPassword("admin", "123456")),
+			gost.TLSConfigHandlerOption(tlsConfig()),
+		)
+	}
 
 	return g.gostServer.Serve(h)
 }

@@ -164,28 +164,7 @@ func (server *Server) GetTunnelService() *GostTunnel {
 	return result
 }
 
-func (server *Server) Start(port int, caCertPath, serverCertPath, serverKeyPath string) error {
-	// Load server's certificate and private key
-	cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
-	if err != nil {
-		log.Fatalf("server: loadkeys: %s", err)
-	}
-
-	// Create a CA certificate pool and add ca.crt to it
-	caCert, err := os.ReadFile(caCertPath)
-	if err != nil {
-		log.Fatal("server: read ca cert: ", err)
-	}
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
-
-	// Create a TLS configuration with client authentication
-	config := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    caCertPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-	}
-
+func (server *Server) Start(port int, caCertPath, serverCertPath, serverKeyPath string, noTLS bool) error {
 	// Setup Gost SSH Tunnel Services
 	for i := 0; i < 30; i++ {
 		freePort, err := server.portsManager.ReservePort()
@@ -194,7 +173,7 @@ func (server *Server) Start(port int, caCertPath, serverCertPath, serverKeyPath 
 			server.logger.Error(err)
 			return err
 		}
-		gostTunnel := NewGostTunnel(freePort, server)
+		gostTunnel := NewGostTunnel(freePort, server, noTLS)
 		server.gostTunnels = append(server.gostTunnels, gostTunnel)
 		go func(server *Server, gostTunnel *GostTunnel) {
 			server.logger.Info("Starting Gost Reverse Tunnel On Port: " + strconv.Itoa(gostTunnel.Port))
@@ -208,15 +187,49 @@ func (server *Server) Start(port int, caCertPath, serverCertPath, serverKeyPath 
 		}(server, gostTunnel)
 	}
 
-	// Listen for incoming connections using the TLS config
-	listener, err := tls.Listen("tcp", ":"+strconv.Itoa(port), config)
-	if err != nil {
-		err = errors.Wrap(err, "Unable to start secure server")
-		server.logger.Error(err)
-		return err
+	var listener net.Listener
+	var err error
+	if noTLS {
+		// Listen for incoming connections without TLS
+		listener, err = net.Listen("tcp", ":"+strconv.Itoa(port))
+		if err != nil {
+			err = errors.Wrap(err, "Unable to start server")
+			server.logger.Error(err)
+			return err
+		}
+		log.Printf("Joebot server listening on port %d", port)
+	} else {
+		// Load server's certificate and private key
+		cert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		if err != nil {
+			log.Fatalf("server: loadkeys: %s", err)
+		}
+
+		// Create a CA certificate pool and add ca.crt to it
+		caCert, err := os.ReadFile(caCertPath)
+		if err != nil {
+			log.Fatal("server: read ca cert: ", err)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		// Create a TLS configuration with client authentication
+		config := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientCAs:    caCertPool,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+		}
+
+		// Listen for incoming connections using the TLS config
+		listener, err = tls.Listen("tcp", ":"+strconv.Itoa(port), config)
+		if err != nil {
+			err = errors.Wrap(err, "Unable to start secure server")
+			server.logger.Error(err)
+			return err
+		}
+		log.Printf("Joebot server listening securely on port %d", port)
 	}
 	server.tcpListener = listener
-	log.Printf("Joebot server listening securely on port %d", port)
 
 	go func() {
 		for {
