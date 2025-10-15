@@ -3,7 +3,7 @@
 set -e
 
 # --- Configuration ---
-GO_VERSION="1.24.6"
+GO_VERSION="1.25.0"
 GO_ARCHIVE="go${GO_VERSION}.linux-amd64.tar.gz"
 # --- End Configuration ---
 
