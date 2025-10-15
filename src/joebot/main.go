@@ -143,12 +143,13 @@ func runServer() error {
 	e := buildEchoServer(s, db)
 	return startWebPortal(e, *webPortalPort, *sNoTLS, *sServerCertPath, *sServerKeyPath)
 }
+
 func buildEchoServer(s *server.Server, db *sql.DB) *echo.Echo {
 	e := echo.New()
 	v1 := e.Group("/api")
 
 	// BasicAuth middleware using the SQLite database for user validation.
-	v1.Use(createAuthMiddleware(db, s))
+	v1.Use(createAuthMiddleware(db))
 
 	// Whitelist middleware
 	v1.Use(createWhitelistMiddleware(s))
@@ -242,7 +243,7 @@ func handleBulkInstall(s *server.Server) echo.HandlerFunc {
 	}
 }
 
-func createAuthMiddleware(db *sql.DB, s *server.Server) echo.MiddlewareFunc {
+func createAuthMiddleware(db *sql.DB) echo.MiddlewareFunc {
 	return middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
 		var passwordHash string
 		err := db.QueryRow("SELECT password_hash FROM users WHERE username = ?", username).Scan(&passwordHash)
