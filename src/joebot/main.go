@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io" // Use io.ReadAll
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -102,188 +103,243 @@ func main() {
 	command := kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	switch command {
-	// --- Server Mode Execution ---
 	case serverCommand.FullCommand():
-		if !*sNoTLS && (*sCaCertPath == "" || *sServerCertPath == "" || *sServerKeyPath == "") {
-			log.Fatalf("FATAL: --ca-cert, --server-cert, and --server-key are required unless --no-tls is specified.")
+		if err := runServer(); err != nil {
+			log.Fatal(err)
 		}
-		db, err := initDB(*sDbPath)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to initialize database: %v", err)
-		}
-		defer db.Close()
-		log.Println("Successfully connected to the database.")
-
-		logger := logrus.New()
-		if *sVerbose {
-			logger.SetLevel(logrus.DebugLevel)
-		}
-		s := server.NewServer(logger, db)
-		go s.Start(*serverPort, *sCaCertPath, *sServerCertPath, *sServerKeyPath, *sNoTLS)
-
-		e := echo.New()
-		v1 := e.Group("/api")
-
-		// BasicAuth middleware using the SQLite database for user validation.
-		v1.Use(middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
-			var passwordHash string
-			err := db.QueryRow("SELECT password_hash FROM users WHERE username = ?", username).Scan(&passwordHash)
-			if err != nil {
-				if err == sql.ErrNoRows {
-					log.Printf("Failed login attempt for non-existent user '%s' from IP: %s", username, c.RealIP())
-					return false, nil // User not found
-				}
-				log.Printf("ERROR: Database query failed for user '%s': %v", username, err)
-				return false, err // Database error
-			}
-
-			err = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password))
-			if err != nil {
-				log.Printf("Failed login attempt (wrong password) for user '%s' from IP: %s", username, c.RealIP())
-				return false, nil // Passwords do not match
-			}
-
-			// Success! Whitelist the IP.
-			clientIP := c.RealIP()
-			_, dbErr := db.Exec("INSERT INTO whitelisted_ips (ip_address, last_seen) VALUES (?, CURRENT_TIMESTAMP) ON CONFLICT(ip_address) DO UPDATE SET last_seen = CURRENT_TIMESTAMP;", clientIP)
-			if dbErr != nil {
-				log.Printf("ERROR: Failed to whitelist IP %s: %v", clientIP, dbErr)
-			}
-			// log.Printf("Successful login for user '%s' from IP: %s", username, clientIP)
-			return true, nil
-		}))
-
-		v1.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-			return func(c echo.Context) error {
-				isWhitelisted, err := s.IsIPWhitelisted(c.RealIP())
-				if err != nil || !isWhitelisted {
-					log.Printf("Blocked unauthorized API request from IP: %s", c.RealIP())
-					return c.String(http.StatusUnauthorized, "Unauthorized: Your IP is not whitelisted.")
-				}
-				return next(c)
-			}
-		})
-
-		webPortalAssetsFS := WebPortalAssetsFS()
-
-		v1.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-			AllowOrigins: []string{"*"},
-			AllowMethods: []string{echo.GET, echo.HEAD, echo.PUT, echo.PATCH, echo.POST, echo.DELETE},
-		}))
-		e.GET("/", func(c echo.Context) error {
-			f, err := webPortalAssetsFS.Open("index.html")
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer f.Close()
-			b, err := io.ReadAll(f) // Correctly read from the file handle
-			if err != nil {
-				log.Fatal(err)
-			}
-			return c.HTML(200, string(b))
-		})
-		e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(webPortalAssetsFS))))
-		v1.GET("/clients", func(c echo.Context) error {
-			return c.JSON(http.StatusOK, s.GetClientsList())
-		})
-		v1.POST("/client/:id", func(c echo.Context) error {
-			type msg struct {
-				Message string `json:"message"`
-			}
-
-			client, err := s.GetClientById(c.Param("id"))
-			if err != nil {
-				return c.JSON(http.StatusNotFound, msg{err.Error()})
-			}
-			portStr := c.FormValue("target_client_port")
-			port, err := strconv.Atoi(portStr)
-			if err != nil || port <= 0 {
-				return c.JSON(http.StatusBadRequest, msg{"Invalid target_client_port"})
-			}
-
-			portTunnelInfo, err := client.CreateTunnel(port)
-			if err != nil {
-				return c.JSON(http.StatusInternalServerError, msg{err.Error()})
-			}
-
-			return c.JSON(http.StatusOK, portTunnelInfo)
-		})
-		v1.POST("/bulk-install", func(c echo.Context) error {
-			json := models.BulkInstallInfo{}
-
-			if err := c.Bind(&json); err != nil {
-				return err
-			}
-			result, err := s.BulkInstallJoebot(json)
-			if err != nil {
-				return err
-			}
-
-			return c.String(http.StatusOK, result)
-		})
-
-		log.Printf("Web portal starting on http://0.0.0.0:%d", *webPortalPort)
-		if *sNoTLS {
-			if err := e.Start(":" + strconv.Itoa(*webPortalPort)); err != nil {
-				log.Fatal("FATAL: Could not start web portal: ", err)
-			}
-		} else {
-			log.Printf("Secure web portal starting on https://0.0.0.0:%d", *webPortalPort)
-			if err := e.StartTLS(":"+strconv.Itoa(*webPortalPort), *sServerCertPath, *sServerKeyPath); err != nil {
-				log.Fatal("FATAL: Could not start secure web portal: ", err)
-			}
-		}
-
 	case clientCommand.FullCommand():
-		if !*cNoTLS && (*cCaCertPath == "" || *cClientCertPath == "" || *cClientKeyPath == "") {
-			log.Fatalf("FATAL: --ca-cert, --client-cert, and --client-key are required unless --no-tls is specified.")
+		if err := runClient(); err != nil {
+			log.Fatal(err)
 		}
-		wg := &sync.WaitGroup{}
-		wg.Add(1)
-
-		logger := logrus.New()
-		if *cVerbose {
-			logger.SetLevel(logrus.DebugLevel)
-		}
-
-		c := client.NewClient(*cServerIP, *cServerPort, *cAllowedPortRangeLBound, *cAllowedPortRangeUBound, *cTags, *cCaCertPath, *cClientCertPath, *cClientKeyPath, *cNoTLS, logger)
-		c.FilebrowserDefaultDir = *cFilebrowserDefaultDirectory
-		c.Start()
-		wg.Wait()
-
 	case userAddCmd.FullCommand():
-		db, err := initDB(*userDbPath)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to open database: %v", err)
+		if err := runUserAdd(); err != nil {
+			log.Fatal(err)
 		}
-		defer db.Close()
-
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*userAddPassword), bcrypt.DefaultCost)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to hash password: %v", err)
-		}
-
-		_, err = db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", *userAddUsername, string(hashedPassword))
-		if err != nil {
-			log.Fatalf("FATAL: Failed to add user to database: %v", err)
-		}
-		fmt.Printf("Successfully added user: %s\n", *userAddUsername)
-
 	case userDelCmd.FullCommand():
-		db, err := initDB(*userDbPath)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to open database: %v", err)
-		}
-		defer db.Close()
-		res, err := db.Exec("DELETE FROM users WHERE username = ?", *userDelUsername)
-		if err != nil {
-			log.Fatalf("FATAL: Failed to delete user: %v", err)
-		}
-		rowsAffected, _ := res.RowsAffected()
-		if rowsAffected == 0 {
-			fmt.Printf("User '%s' not found.\n", *userDelUsername)
-		} else {
-			fmt.Printf("Successfully deleted user: %s\n", *userDelUsername)
+		if err := runUserDel(); err != nil {
+			log.Fatal(err)
 		}
 	}
+}
+
+func runServer() error {
+	if !*sNoTLS && (*sCaCertPath == "" || *sServerCertPath == "" || *sServerKeyPath == "") {
+		return fmt.Errorf("FATAL: --ca-cert, --server-cert, and --server-key are required unless --no-tls is specified")
+	}
+	db, err := initDB(*sDbPath)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+	log.Println("Successfully connected to the database.")
+
+	logger := logrus.New()
+	if *sVerbose {
+		logger.SetLevel(logrus.DebugLevel)
+	}
+	s := server.NewServer(logger, db)
+	go s.Start(*serverPort, *sCaCertPath, *sServerCertPath, *sServerKeyPath, *sNoTLS)
+
+	e := buildEchoServer(s, db)
+	return startWebPortal(e, *webPortalPort, *sNoTLS, *sServerCertPath, *sServerKeyPath)
+}
+func buildEchoServer(s *server.Server, db *sql.DB) *echo.Echo {
+	e := echo.New()
+	v1 := e.Group("/api")
+
+	// BasicAuth middleware using the SQLite database for user validation.
+	v1.Use(createAuthMiddleware(db, s))
+
+	// Whitelist middleware
+	v1.Use(createWhitelistMiddleware(s))
+
+	webPortalAssetsFS := WebPortalAssetsFS()
+
+	v1.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{echo.GET, echo.HEAD, echo.PUT, echo.PATCH, echo.POST, echo.DELETE},
+	}))
+	e.GET("/", makeIndexHandler(webPortalAssetsFS))
+	e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(webPortalAssetsFS))))
+	v1.GET("/clients", handleGetClients(s))
+	v1.POST("/client/:id", handleCreateTunnel(s))
+	v1.POST("/bulk-install", handleBulkInstall(s))
+	return e
+}
+
+func createWhitelistMiddleware(s *server.Server) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			isWhitelisted, err := s.IsIPWhitelisted(c.RealIP())
+			if err != nil || !isWhitelisted {
+				log.Printf("Blocked unauthorized API request from IP: %s", c.RealIP())
+				return c.String(http.StatusUnauthorized, "Unauthorized: Your IP is not whitelisted.")
+			}
+			return next(c)
+		}
+	}
+}
+
+func makeIndexHandler(webPortalAssetsFS fs.FS) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		f, err := webPortalAssetsFS.Open("index.html")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		b, err := io.ReadAll(f)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return c.HTML(200, string(b))
+	}
+}
+
+func handleGetClients(s *server.Server) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		return c.JSON(http.StatusOK, s.GetClientsList())
+	}
+}
+
+func handleCreateTunnel(s *server.Server) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		type msg struct {
+			Message string `json:"message"`
+		}
+
+		client, err := s.GetClientById(c.Param("id"))
+		if err != nil {
+			return c.JSON(http.StatusNotFound, msg{err.Error()})
+		}
+		portStr := c.FormValue("target_client_port")
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port <= 0 {
+			return c.JSON(http.StatusBadRequest, msg{"Invalid target_client_port"})
+		}
+
+		portTunnelInfo, err := client.CreateTunnel(port)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, msg{err.Error()})
+		}
+
+		return c.JSON(http.StatusOK, portTunnelInfo)
+	}
+}
+
+func handleBulkInstall(s *server.Server) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		json := models.BulkInstallInfo{}
+
+		if err := c.Bind(&json); err != nil {
+			return err
+		}
+		result, err := s.BulkInstallJoebot(json)
+		if err != nil {
+			return err
+		}
+
+		return c.String(http.StatusOK, result)
+	}
+}
+
+func createAuthMiddleware(db *sql.DB, s *server.Server) echo.MiddlewareFunc {
+	return middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
+		var passwordHash string
+		err := db.QueryRow("SELECT password_hash FROM users WHERE username = ?", username).Scan(&passwordHash)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				log.Printf("Failed login attempt for non-existent user '%s' from IP: %s", username, c.RealIP())
+				return false, nil
+			}
+			log.Printf("ERROR: Database query failed for user '%s': %v", username, err)
+			return false, err
+		}
+
+		err = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password))
+		if err != nil {
+			log.Printf("Failed login attempt (wrong password) for user '%s' from IP: %s", username, c.RealIP())
+			return false, nil
+		}
+
+		clientIP := c.RealIP()
+		_, dbErr := db.Exec("INSERT INTO whitelisted_ips (ip_address, last_seen) VALUES (?, CURRENT_TIMESTAMP) ON CONFLICT(ip_address) DO UPDATE SET last_seen = CURRENT_TIMESTAMP;", clientIP)
+		if dbErr != nil {
+			log.Printf("ERROR: Failed to whitelist IP %s: %v", clientIP, dbErr)
+		}
+		return true, nil
+	})
+}
+
+func startWebPortal(e *echo.Echo, port int, noTLS bool, certPath, keyPath string) error {
+	log.Printf("Web portal starting on http://0.0.0.0:%d", port)
+	if noTLS {
+		if err := e.Start(":" + strconv.Itoa(port)); err != nil {
+			return fmt.Errorf("FATAL: Could not start web portal: %v", err)
+		}
+		return nil
+	}
+
+	log.Printf("Secure web portal starting on https://0.0.0.0:%d", port)
+	if err := e.StartTLS(":"+strconv.Itoa(port), certPath, keyPath); err != nil {
+		return fmt.Errorf("FATAL: Could not start secure web portal: %v", err)
+	}
+	return nil
+}
+
+func runClient() error {
+	if !*cNoTLS && (*cCaCertPath == "" || *cClientCertPath == "" || *cClientKeyPath == "") {
+		return fmt.Errorf("FATAL: --ca-cert, --client-cert, and --client-key are required unless --no-tls is specified")
+	}
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	logger := logrus.New()
+	if *cVerbose {
+		logger.SetLevel(logrus.DebugLevel)
+	}
+
+	c := client.NewClient(*cServerIP, *cServerPort, *cAllowedPortRangeLBound, *cAllowedPortRangeUBound, *cTags, *cCaCertPath, *cClientCertPath, *cClientKeyPath, *cNoTLS, logger)
+	c.FilebrowserDefaultDir = *cFilebrowserDefaultDirectory
+	c.Start()
+	wg.Wait()
+	return nil
+}
+
+func runUserAdd() error {
+	db, err := initDB(*userDbPath)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*userAddPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to hash password: %v", err)
+	}
+
+	_, err = db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", *userAddUsername, string(hashedPassword))
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to add user to database: %v", err)
+	}
+	fmt.Printf("Successfully added user: %s\n", *userAddUsername)
+	return nil
+}
+
+func runUserDel() error {
+	db, err := initDB(*userDbPath)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to open database: %v", err)
+	}
+	defer db.Close()
+	res, err := db.Exec("DELETE FROM users WHERE username = ?", *userDelUsername)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to delete user: %v", err)
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		fmt.Printf("User '%s' not found.\n", *userDelUsername)
+	} else {
+		fmt.Printf("Successfully deleted user: %s\n", *userDelUsername)
+	}
+	return nil
 }
