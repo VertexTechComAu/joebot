@@ -114,6 +114,7 @@ func (t *NovncTask) Handle(body []byte, stream net.Conn) error {
 		return err
 	}
 
+	t.logger.Infof("Received NoVNC WebSocket tunnel request: %+v", tunnelInfo)
 	// Start the WebSocket server in a new goroutine so it doesn't block the handler.
 	go t.handle(tunnelInfo)
 

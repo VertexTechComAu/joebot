@@ -103,7 +103,7 @@ func (client *Client) Start() {
 	if _, err = client.CreateGottyWebTerminal(); err != nil {
 		client.logger.Info(errors.Wrap(err, "Failed To Create Gotty Web Terminal Tunnel"))
 	}
-	if _, err = client.CreateNovncWebsocketTunnel(5901); err != nil {
+	if _, err = client.CreateNovncWebsocketTunnel(5902); err != nil {
 		client.logger.Info(errors.Wrap(err, "Failed To Create NoVNC Websocket Tunnel"))
 	}
 	if _, err = client.CreateFilebrowser(); err != nil {
@@ -213,6 +213,7 @@ func (client *Client) CreateNovncWebsocketTunnel(clientVncPort int) (models.Novn
 	client.logger.WithField("Client ID", client.ID).Infof("Creating novnc Websocket Tunnel | Client VNC Port %d", clientVncPort)
 
 	novncWebsocketInfo.NovncWebsocketPort = clientVncPort
+	novncWebsocketInfo.VncServerPort = clientVncPort
 	stream, err := task.NewTask(client.ctx, task.NovncRequest, client.logger).Request(client.session, utils.StructToBytes(novncWebsocketInfo))
 	if err != nil {
 		return novncWebsocketInfo, err
@@ -228,6 +229,7 @@ func (client *Client) CreateNovncWebsocketTunnel(clientVncPort int) (models.Novn
 	}
 
 	portTunnelInfo, err := client.CreateTunnel(novncWebsocketInfo.NovncWebsocketPort)
+	client.logger.Infof("NoVNC Websocket Tunnel Created | Host Port %d -> Client Port %d", portTunnelInfo.ServerPort, portTunnelInfo.ClientPort)
 	if err != nil {
 		return novncWebsocketInfo, errors.Wrap(err, "Failed To Create Tunnel To NoVNC Websocket")
 	}
